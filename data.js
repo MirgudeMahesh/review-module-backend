@@ -1,53 +1,85 @@
 const express = require('express');
-const mysql   = require('mysql2/promise');
-const app     = express();
-const cors    = require('cors');
-app.use(cors());  
+const mysql = require('mysql2/promise');
+const app = express();
+const cors = require('cors');
+app.use(cors());
+
 const pool = mysql.createPool({
-  host: "192.168.0.243",
-  user: "repforce1",
-  password: "Nhu@45TreQ",
+  host: "localhost",
+  port: 3306,
+  user: "root",
+  password: "root",
   database: "pulse_new"
 });
 
-// GET /hierarchy/BM3
-app.get('/hierarchy/:emp', async (req,res)=>{
+// Helper to compute average recursively
+function computeAverages(node) {
+  const childrenKeys = Object.keys(node.children);
+  if (childrenKeys.length === 0) {
+    return node.amount;
+  }
+
+  let sum = 0;
+  let count = 0;
+
+  for (const childName of childrenKeys) {
+    const child = node.children[childName];
+    const val = computeAverages(child);
+    sum += val;
+    count++;
+  }
+
+  node.amount = count > 0 ? Math.round(sum / count) : 0;
+  return node.amount;
+}
+
+// GET /hierarchy/:emp
+app.get('/hierarchy/:emp', async (req, res) => {
   const emp = req.params.emp;
 
   const query = `
     WITH RECURSIVE downline AS (
-      SELECT Emp_Name, Reporting_Manager
+      SELECT Emp_Code, Emp_Name, Role, Reporting_Manager
       FROM Employee_Details
       WHERE Emp_Name = ?
 
       UNION ALL
 
-      SELECT e.Emp_Name, e.Reporting_Manager
+      SELECT e.Emp_Code, e.Emp_Name, e.Role, e.Reporting_Manager
       FROM Employee_Details e
-      JOIN downline d ON e.Reporting_Manager = d.Emp_Name
+      JOIN downline d ON e.Reporting_Manager_Code = d.Emp_Code
     )
-    SELECT * FROM downline;
+    SELECT d.Emp_Name, d.Reporting_Manager, d.Role,
+           IFNULL(c.Coverage, 0) AS amount
+    FROM downline d
+    LEFT JOIN Coverage_Details c ON d.Emp_Code = c.Emp_Code;
   `;
 
-  try{
-    const [rows] = await pool.query(query,[emp]);
+  try {
+    const [rows] = await pool.query(query, [emp]);
 
-    // build nested object
-    const map={}, root={};
-    rows.forEach(r=>{
-      map[r.Emp_Name] = { amount: Math.floor(Math.random()*100), children:{} };
+    const map = {}, root = {};
+
+    rows.forEach(r => {
+      const amount = r.Role === 'BE' ? r.amount : 0;
+      map[r.Emp_Name] = { amount, children: {} };
     });
-    rows.forEach(r=>{
-      if(r.Emp_Name===emp){
+
+    rows.forEach(r => {
+      if (r.Emp_Name === emp) {
         root[r.Emp_Name] = map[r.Emp_Name];
-      }
-      else if(map[r.Reporting_Manager]){
+      } else if (map[r.Reporting_Manager]) {
         map[r.Reporting_Manager].children[r.Emp_Name] = map[r.Emp_Name];
       }
     });
 
+    // Recursively compute average amounts
+    for (const top in root) {
+      computeAverages(root[top]);
+    }
+
     res.json(root);
-  }catch(err){
+  } catch (err) {
     console.error(err);
     res.status(500).send("Error");
   }
@@ -56,10 +88,10 @@ app.get('/hierarchy/:emp', async (req,res)=>{
 app.get('/employees', async (req, res) => {
   try {
     const [rows] = await pool.query(`
-      SELECT DISTINCT Emp_Name AS name
-      FROM Employee_Details
-      WHERE Role <> 'BE'
-      order BY Emp_Name
+      SELECT Emp_Name AS name, Role 
+      FROM Employee_Details 
+      WHERE Role <> 'BE' 
+      ORDER BY Emp_Name
     `);
     res.json(rows);
   } catch (err) {
@@ -68,4 +100,5 @@ app.get('/employees', async (req, res) => {
   }
 });
 
-app.listen(8000,()=>console.log("Server running on port 8000"));
+
+app.listen(8000, () => console.log("Server running on port 8000"));
