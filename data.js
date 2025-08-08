@@ -4,6 +4,8 @@ const app = express();
 const cors = require('cors');
 app.use(cors());
 
+app.use(express.json());
+
 const pool = mysql.createPool({
   host: "localhost",
   port: 3306,
@@ -39,17 +41,17 @@ app.get('/hierarchy/:emp', async (req, res) => {
 
   const query = `
     WITH RECURSIVE downline AS (
-      SELECT Emp_Code, Emp_Name, Role, Reporting_Manager
+      SELECT Emp_Code, Emp_Name, Role, Reporting_Manager, Territory
       FROM Employee_Details
       WHERE Emp_Name = ?
 
       UNION ALL
 
-      SELECT e.Emp_Code, e.Emp_Name, e.Role, e.Reporting_Manager
+      SELECT e.Emp_Code, e.Emp_Name, e.Role, e.Reporting_Manager, e.Territory
       FROM Employee_Details e
       JOIN downline d ON e.Reporting_Manager_Code = d.Emp_Code
     )
-    SELECT d.Emp_Name, d.Reporting_Manager, d.Role,
+    SELECT d.Emp_Name, d.Reporting_Manager, d.Role, d.Territory,
            IFNULL(c.Coverage, 0) AS amount
     FROM downline d
     LEFT JOIN Coverage_Details c ON d.Emp_Code = c.Emp_Code;
@@ -62,7 +64,12 @@ app.get('/hierarchy/:emp', async (req, res) => {
 
     rows.forEach(r => {
       const amount = r.Role === 'BE' ? r.amount : 0;
-      map[r.Emp_Name] = { amount, children: {} };
+      map[r.Emp_Name] = {
+        amount,
+        territory: r.Territory || null,
+        role: r.Role || null,
+        children: {}
+      };
     });
 
     rows.forEach(r => {
@@ -85,20 +92,77 @@ app.get('/hierarchy/:emp', async (req, res) => {
   }
 });
 
+
 app.get('/employees', async (req, res) => {
   try {
     const [rows] = await pool.query(`
-      SELECT Emp_Name AS name, Role 
+      SELECT Emp_Name AS name, Role, Emp_Code, Territory 
       FROM Employee_Details 
       WHERE Role <> 'BE' 
       ORDER BY Emp_Name
     `);
     res.json(rows);
+    
   } catch (err) {
     console.error(err);
     res.status(500).send("Error");
   }
 });
+
+app.post('/putData', async (req, res) => {
+  try {
+    const dataToInsert = req.body;
+    const dataArray = Array.isArray(dataToInsert) ? dataToInsert : [dataToInsert];
+
+    if (dataArray.length === 0) {
+      return res.status(400).send('No data received');
+    }
+
+    const values = dataArray.map(row => [
+      row.metric,
+      row.sender,
+      row.sender_code,
+      row.sender_territory,
+      row.receiver,
+      row.receiver_code,
+      row.receiver_territory,
+      row.goal,
+      row.received_date,
+      row.goal_date,
+      row.receiver_commit_date || null,
+      row.commitment
+    ]);
+
+    const query = `
+      INSERT INTO commitments (
+        metric,
+        sender,
+        sender_code,
+        sender_territory,
+        receiver,
+        receiver_code,
+        receiver_territory,
+        goal,
+        received_date,
+        goal_date,
+        receiver_commit_date,
+        commitment
+      ) VALUES ?`;
+
+    // ✅ Use await instead of callback
+    const [result] = await pool.query(query, [values]);
+
+    console.log('hello'); // ✅ Now this will print
+    return res.status(201).send('success');
+    
+  } catch (err) {
+    console.log('hello1'); // ✅ Now this will print if error
+    return res.status(500).send('Internal Server Error');
+  }
+});
+
+
+
 
 
 app.listen(8000, () => console.log("Server running on port 8000"));
