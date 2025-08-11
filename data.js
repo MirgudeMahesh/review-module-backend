@@ -98,7 +98,7 @@ app.get('/employees', async (req, res) => {
     const [rows] = await pool.query(`
       SELECT Emp_Name AS name, Role, Emp_Code, Territory 
       FROM Employee_Details 
-      WHERE Role <> 'BE' 
+     
       ORDER BY Emp_Name
     `);
     res.json(rows);
@@ -160,9 +160,182 @@ app.post('/putData', async (req, res) => {
     return res.status(500).send('Internal Server Error');
   }
 });
+app.post('/putEscalations', async (req, res) => {
+  try {
+    const dataToInsert = req.body;
+    const dataArray = Array.isArray(dataToInsert) ? dataToInsert : [dataToInsert];
+
+    if (dataArray.length === 0) {
+      return res.status(400).send('No data received');
+    }
+
+    // Map incoming JSON to match table columns
+    const values = dataArray.map(row => [
+      row.metric,
+      row.message,
+      row.role,
+      row.employee_name,
+      row.territory_code,
+      row.employee_code,
+      row.entry_date
+    ]);
+
+    const query = `
+      INSERT INTO escalations (
+        metric,
+        message,
+        role,
+        employee_name,
+        territory_code,
+        employee_code,
+        entry_date
+      ) VALUES ?`;
+
+    const [result] = await pool.query(query, [values]);
+
+    console.log('✅ Escalations inserted successfully');
+    return res.status(201).send('success');
+
+  } catch (err) {
+    console.error('❌ Error inserting escalations:', err);
+    return res.status(500).send('Internal Server Error');
+  }
+});
+
+app.get('/getData/:receiver_territory', async (req, res) => {
+  try {
+    const { receiver_territory } = req.params;
+
+    if (!receiver_territory) {
+      return res.status(400).send('receiver_territory is required');
+    }
+
+    const query = `
+      SELECT 
+        metric,
+        sender,
+        sender_code,
+        sender_territory,
+        receiver,
+        receiver_code,
+        receiver_territory,
+        goal,
+        received_date,
+        goal_date,
+        receiver_commit_date,
+        commitment
+      FROM commitments
+      WHERE receiver_territory = ?
+    `;
+
+    const [rows] = await pool.query(query, [receiver_territory]);
+
+    if (rows.length === 0) {
+      return res.status(404).send('No data found for this territory');
+    }
+
+    return res.status(200).json(rows);
+
+  } catch (err) {
+    console.error('Error fetching data:', err);
+    return res.status(500).send('Internal Server Error');
+  }
+});
 
 
 
+// Update receiver_commit_date
+app.put('/updateReceiverCommitDate', async (req, res) => {
+  try {
+    const {
+      metric,
+      sender_code,
+      receiver_code,
+      receiver_commit_date
+    } = req.body;
 
+    if (!metric || !sender_code || !receiver_code || !receiver_commit_date) {
+      return res.status(400).send('metric, sender_code, receiver_code, and receiver_commit_date are required');
+    }
+
+    const query = `
+      UPDATE commitments
+      SET receiver_commit_date = ?
+      WHERE metric = ? AND sender_code = ? AND receiver_code = ?
+    `;
+
+    const [result] = await pool.query(query, [
+      receiver_commit_date,
+      metric,
+      sender_code,
+      receiver_code
+    ]);
+
+    if (result.affectedRows === 0) {
+      return res.status(404).send('No matching commitment found');
+    }
+
+    res.status(200).send('Date updated successfully');
+  } catch (err) {
+    console.error('Error updating date:', err);
+    res.status(500).send('Internal Server Error');
+  }
+});
+
+app.post("/addEscalation", async (req, res) => {
+  try {
+    const {
+      metric,
+      sender,
+      sender_code,
+      sender_territory,
+      from,
+      to,
+      received_date,
+      goal_date,
+      message
+    } = req.body;
+
+    // Validate required fields
+    if (
+      !metric ||
+      !sender ||
+      !sender_code ||
+      !sender_territory ||
+      from === undefined ||
+      to === undefined ||
+      !received_date ||
+      !goal_date
+    ) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    // Insert into DB
+    const query = `
+      INSERT INTO disclosures
+      (metric, sender, sender_code, sender_territory, \`from\`, \`to\`, received_date, goal_date, message) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+
+    const values = [
+      metric,
+      sender,
+      sender_code,
+      sender_territory,
+      from,
+      to,
+      received_date,
+      goal_date,
+      message || null
+    ];
+
+    await pool.query(query, values);
+
+    res.status(201).json({ message: "Commitment added successfully" });
+  } catch (error) {
+    console.error("Error inserting data:", error);
+    res.status(500).json({ error: "Database error" });
+  }
+});
 
 app.listen(8000, () => console.log("Server running on port 8000"));
