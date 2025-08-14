@@ -108,7 +108,7 @@ app.get('/employees', async (req, res) => {
     res.status(500).send("Error");
   }
 });
-
+/*adding commitments*/
 app.post('/putData', async (req, res) => {
   try {
     const dataToInsert = req.body;
@@ -337,5 +337,54 @@ app.post("/addEscalation", async (req, res) => {
     res.status(500).json({ error: "Database error" });
   }
 });
+
+app.post('/putInfo', async (req, res) => {
+  try {
+    const dataToInsert = req.body;
+
+    // Ensure data is always an array
+    const dataArray = Array.isArray(dataToInsert) ? dataToInsert : [dataToInsert];
+
+    // Validate empty input
+    if (dataArray.length === 0) {
+      return res.status(400).send('No data received');
+    }
+
+    // Map request data to match table columns
+    const values = dataArray.map(row => [
+      row.sender,
+      row.sender_code,
+      row.sender_territory,
+      row.receiver,
+      row.receiver_code,
+      row.receiver_territory,
+      row.received_date,
+      row.message
+    ]);
+
+    const query = `
+      INSERT INTO information (
+        sender,
+        sender_code,
+        sender_territory,
+        receiver,
+        receiver_code,
+        receiver_territory,
+        received_date,
+        message
+      ) VALUES ?`;
+
+    // Execute query
+    const [result] = await pool.query(query, [values]);
+
+    console.log('✅ Data inserted into information table');
+    return res.status(201).send('success');
+    
+  } catch (err) {
+    console.error('❌ Error inserting into information table:', err);
+    return res.status(500).send('Internal Server Error');
+  }
+});
+
 
 app.listen(8000, () => console.log("Server running on port 8000"));
