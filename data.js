@@ -386,5 +386,53 @@ app.post('/putInfo', async (req, res) => {
   }
 });
 
+// Fetch data based on metric + range
+app.post("/filterData", async (req, res) => {
+  try {
+    const { metric, from, to } = req.body;
+
+    if (!metric || from === undefined || to === undefined) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    // For your case, only metric = Coverage matters
+    const query = `
+      SELECT Territory_Name, Emp_Code, Employee_Name, ${metric}
+      FROM coverage_details
+      WHERE ${metric} BETWEEN ? AND ?
+    `;
+
+    const [rows] = await pool.query(query, [from, to]);
+
+    res.json(rows);
+  } catch (error) {
+    console.error("Error filtering data:", error);
+    res.status(500).json({ error: "Database error" });
+  }
+});
+
+app.post("/getMessagesByTerritory", async (req, res) => {
+  try {
+    const { receiver_territory } = req.body;
+
+    if (!receiver_territory) {
+      return res.status(400).json({ error: "receiver_territory is required" });
+    }
+
+    // Query DB
+    const query = `
+      SELECT * 
+      FROM information
+      WHERE receiver_territory = ?
+    `;
+
+    const [rows] = await pool.query(query, [receiver_territory]);
+
+    res.json({ results: rows });
+  } catch (error) {
+    console.error("Error fetching messages:", error);
+    res.status(500).json({ error: "Database error" });
+  }
+});
 
 app.listen(8000, () => console.log("Server running on port 8000"));
