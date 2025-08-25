@@ -15,28 +15,43 @@ const pool = mysql.createPool({
 });
 
 // Helper to compute average recursively
-function computeAverages(node) {
+
+
+// --------- Load sales.csv into memory ----------
+// ---------- Recursive Aggregation (Coverage + Sales) ----------
+function computeAggregates(node) {
   const childrenKeys = Object.keys(node.children);
+
   if (childrenKeys.length === 0) {
-    return node.amount;
+    // ----- Leaf Node (BE) -----
+    const totalSales = node.sales.reduce((sum, s) => sum + (s.sales || 0), 0);
+    node.totalSales = totalSales;
+    return { amount: node.amount, sales: totalSales };
   }
 
-  let sum = 0;
+  // ----- Manager Node -----
+  let sumAmount = 0;
   let count = 0;
+  let sumSales = 0;
 
   for (const childName of childrenKeys) {
     const child = node.children[childName];
-    const val = computeAverages(child);
-    sum += val;
+    const childResult = computeAggregates(child);
+
+    sumAmount += childResult.amount;
+    sumSales += childResult.sales;
     count++;
   }
 
-  node.amount = count > 0 ? Math.round(sum / count) : 0;
-  return node.amount;
+  node.amount = count > 0 ? Math.round(sumAmount / count) : 0;
+  node.sales = sumSales;      // managers get aggregated sales
+  node.totalSales = sumSales; // keep naming consistent
+
+  return { amount: node.amount, sales: node.sales };
 }
 
-// GET /hierarchy/:emp
-app.get('/hierarchy/:emp', async (req, res) => {
+// ---------- Hierarchy API ----------
+app.get("/hierarchy/:emp", async (req, res) => {
   const emp = req.params.emp;
 
   const query = `
@@ -51,27 +66,47 @@ app.get('/hierarchy/:emp', async (req, res) => {
       FROM Employee_Details e
       JOIN downline d ON e.Reporting_Manager_Code = d.Emp_Code
     )
-    SELECT d.Emp_Name, d.Reporting_Manager, d.Role, d.Territory,
-           IFNULL(c.Coverage, 0) AS amount
+    SELECT d.Emp_Code, d.Emp_Name, d.Reporting_Manager, d.Role, d.Territory,
+           IFNULL(c.Coverage, 0) AS amount,
+           s.ProductName, s.Sales
     FROM downline d
-    LEFT JOIN Coverage_Details c ON d.Emp_Code = c.Emp_Code;
+    LEFT JOIN Coverage_Details c ON d.Emp_Code = c.Emp_Code
+    LEFT JOIN sales1 s ON d.Emp_Code = s.Emp_Code;
   `;
 
   try {
     const [rows] = await pool.query(query, [emp]);
 
-    const map = {}, root = {};
+    const map = {};
+    const root = {};
+    const salesByEmp = {};
 
+    // ---------- Group sales per employee ----------
     rows.forEach(r => {
-      const amount = r.Role === 'BE' ? r.amount : 0;
-      map[r.Emp_Name] = {
-        amount,
-        territory: r.Territory || null,
-        role: r.Role || null,
-        children: {}
-      };
+      if (!salesByEmp[r.Emp_Code]) salesByEmp[r.Emp_Code] = [];
+      if (r.ProductName) {
+        salesByEmp[r.Emp_Code].push({
+          productName: r.ProductName,
+          sales: r.Sales
+        });
+      }
     });
 
+    // ---------- Build employee map ----------
+    rows.forEach(r => {
+      const amount = r.Role === "BE" ? r.amount : 0;
+      if (!map[r.Emp_Name]) {
+        map[r.Emp_Name] = {
+          amount,
+          territory: r.Territory || null,
+          role: r.Role || null,
+          children: {},
+          sales: r.Role === "BE" ? (salesByEmp[r.Emp_Code] || []) : [] // BEs: array, Managers: will be total later
+        };
+      }
+    });
+
+    // ---------- Connect hierarchy ----------
     rows.forEach(r => {
       if (r.Emp_Name === emp) {
         root[r.Emp_Name] = map[r.Emp_Name];
@@ -80,15 +115,15 @@ app.get('/hierarchy/:emp', async (req, res) => {
       }
     });
 
-    // Recursively compute average amounts
+    // ---------- Compute averages + sales aggregation ----------
     for (const top in root) {
-      computeAverages(root[top]);
+      computeAggregates(root[top]);
     }
 
     res.json(root);
   } catch (err) {
-    console.error(err);
-    res.status(500).send("Error");
+    console.error("❌ Error:", err);
+    res.status(500).send("Error fetching hierarchy");
   }
 });
 
