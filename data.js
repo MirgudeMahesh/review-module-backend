@@ -5,7 +5,8 @@ const mysql = require('mysql2/promise');
 const cors = require('cors');
 
 const app = express();
-
+const fs = require('fs');
+const path = require('path');
 // ---------- CORS ----------
 // Use FRONTEND_ORIGIN in production; fallback to localhost for local dev
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:3000';
@@ -14,22 +15,33 @@ app.use(cors({ origin: FRONTEND_ORIGIN, credentials: true }));
 app.use(express.json());
 
 // ---------- DB pool (supports DATABASE_URL or individual env vars) ----------
+
+
+
 let pool;
+
 try {
+  const sslOptions = process.env.DB_SSL === 'true'
+    ? {
+        ca: fs.readFileSync(path.resolve(__dirname, 'certs', 'aiven-ca.pem')),
+        rejectUnauthorized: true
+      }
+    : undefined;
+
   if (process.env.DATABASE_URL) {
-    // parse DATABASE_URL (mysql://user:pass@host:port/dbname[?params])
     const dbUrl = new URL(process.env.DATABASE_URL);
+
     pool = mysql.createPool({
       host: dbUrl.hostname,
       port: dbUrl.port ? Number(dbUrl.port) : 3306,
       user: decodeURIComponent(dbUrl.username),
       password: decodeURIComponent(dbUrl.password),
-      database: dbUrl.pathname ? dbUrl.pathname.replace('/', '') : undefined,
+      database: dbUrl.pathname.replace('/', ''),
       waitForConnections: true,
       connectionLimit: Number(process.env.DB_CONNECTION_LIMIT || 10),
-      // Planetscale requires SSL; enabling by default in production
-      ssl: { rejectUnauthorized: true }
+      ssl: sslOptions,
     });
+
   } else {
     pool = mysql.createPool({
       host: process.env.DB_HOST || 'localhost',
@@ -39,13 +51,25 @@ try {
       database: process.env.DB_NAME || 'pulse_new',
       waitForConnections: true,
       connectionLimit: Number(process.env.DB_CONNECTION_LIMIT || 10),
-      ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: true } : undefined
+      ssl: sslOptions,
     });
   }
 } catch (err) {
-  console.error('Error creating DB pool:', err);
+  console.error('❌ Error creating DB pool:', err);
   process.exit(1);
 }
+
+// Test connection
+pool.getConnection()
+  .then(conn => {
+    console.log('✅ MySQL connected to Aiven successfully!');
+    conn.release();
+  })
+  .catch(err => {
+    console.error('❌ Failed to connect to Aiven MySQL:', err);
+    process.exit(1);
+  });
+
 
 // ---------- Health check ----------
 app.get('/healthz', (_, res) => res.send('ok'));
@@ -86,20 +110,20 @@ app.get("/hierarchy/:emp", async (req, res) => {
   const query = `
     WITH RECURSIVE downline AS (
       SELECT Emp_Code, Emp_Name, Role, Reporting_Manager, Territory
-      FROM Employee_Details
+      FROM employee_details
       WHERE Emp_Name = ?
 
       UNION ALL
 
       SELECT e.Emp_Code, e.Emp_Name, e.Role, e.Reporting_Manager, e.Territory
-      FROM Employee_Details e
+      FROM employee_details e
       JOIN downline d ON e.Reporting_Manager_Code = d.Emp_Code
     )
     SELECT d.Emp_Code, d.Emp_Name, d.Reporting_Manager, d.Role, d.Territory,
            IFNULL(c.Coverage, 0) AS amount,
            s.ProductName, s.Sales
     FROM downline d
-    LEFT JOIN Coverage_Details c ON d.Emp_Code = c.Emp_Code
+    LEFT JOIN coverage_details c ON d.Emp_Code = c.Emp_Code
     LEFT JOIN sales1 s ON d.Emp_Code = s.Emp_Code;
   `;
   try {
@@ -156,7 +180,7 @@ app.get('/employees', async (req, res) => {
   try {
     const [rows] = await pool.query(`
       SELECT Emp_Name AS name, Role, Emp_Code, Territory 
-      FROM Employee_Details 
+      FROM employee_details
       ORDER BY Emp_Name
     `);
     res.json(rows);
