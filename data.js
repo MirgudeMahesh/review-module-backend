@@ -1,35 +1,65 @@
+// server.js
+require('dotenv').config(); // only for local dev; Render/Vercel use env vars
 const express = require('express');
 const mysql = require('mysql2/promise');
-const app = express();
 const cors = require('cors');
-app.use(cors());
+
+const app = express();
+
+// ---------- CORS ----------
+// Use FRONTEND_ORIGIN in production; fallback to localhost for local dev
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:3000';
+app.use(cors({ origin: FRONTEND_ORIGIN, credentials: true }));
 
 app.use(express.json());
 
-const pool = mysql.createPool({
-  host: "localhost",
-  port: 3306,
-  user: "root",
-  password: "root",
-  database: "pulse_new"
-});
+// ---------- DB pool (supports DATABASE_URL or individual env vars) ----------
+let pool;
+try {
+  if (process.env.DATABASE_URL) {
+    // parse DATABASE_URL (mysql://user:pass@host:port/dbname[?params])
+    const dbUrl = new URL(process.env.DATABASE_URL);
+    pool = mysql.createPool({
+      host: dbUrl.hostname,
+      port: dbUrl.port ? Number(dbUrl.port) : 3306,
+      user: decodeURIComponent(dbUrl.username),
+      password: decodeURIComponent(dbUrl.password),
+      database: dbUrl.pathname ? dbUrl.pathname.replace('/', '') : undefined,
+      waitForConnections: true,
+      connectionLimit: Number(process.env.DB_CONNECTION_LIMIT || 10),
+      // Planetscale requires SSL; enabling by default in production
+      ssl: { rejectUnauthorized: true }
+    });
+  } else {
+    pool = mysql.createPool({
+      host: process.env.DB_HOST || 'localhost',
+      port: Number(process.env.DB_PORT || 3306),
+      user: process.env.DB_USER || 'root',
+      password: process.env.DB_PASSWORD || 'root',
+      database: process.env.DB_NAME || 'pulse_new',
+      waitForConnections: true,
+      connectionLimit: Number(process.env.DB_CONNECTION_LIMIT || 10),
+      ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: true } : undefined
+    });
+  }
+} catch (err) {
+  console.error('Error creating DB pool:', err);
+  process.exit(1);
+}
 
-// Helper to compute average recursively
+// ---------- Health check ----------
+app.get('/healthz', (_, res) => res.send('ok'));
 
-
-// --------- Load sales.csv into memory ----------
-// ---------- Recursive Aggregation (Coverage + Sales) ----------
+// ---------- Helper: computeAggregates (unchanged, kept for your logic) ----------
 function computeAggregates(node) {
   const childrenKeys = Object.keys(node.children);
 
   if (childrenKeys.length === 0) {
-    // ----- Leaf Node (BE) -----
     const totalSales = node.sales.reduce((sum, s) => sum + (s.sales || 0), 0);
     node.totalSales = totalSales;
     return { amount: node.amount, sales: totalSales };
   }
 
-  // ----- Manager Node -----
   let sumAmount = 0;
   let count = 0;
   let sumSales = 0;
@@ -44,16 +74,15 @@ function computeAggregates(node) {
   }
 
   node.amount = count > 0 ? Math.round(sumAmount / count) : 0;
-  node.sales = sumSales;      // managers get aggregated sales
-  node.totalSales = sumSales; // keep naming consistent
+  node.sales = sumSales;
+  node.totalSales = sumSales;
 
   return { amount: node.amount, sales: node.sales };
 }
 
-// ---------- Hierarchy API ----------
+// ---------- Hierarchy API (kept your logic; parameterized query used) ----------
 app.get("/hierarchy/:emp", async (req, res) => {
   const emp = req.params.emp;
-
   const query = `
     WITH RECURSIVE downline AS (
       SELECT Emp_Code, Emp_Name, Role, Reporting_Manager, Territory
@@ -73,7 +102,6 @@ app.get("/hierarchy/:emp", async (req, res) => {
     LEFT JOIN Coverage_Details c ON d.Emp_Code = c.Emp_Code
     LEFT JOIN sales1 s ON d.Emp_Code = s.Emp_Code;
   `;
-
   try {
     const [rows] = await pool.query(query, [emp]);
 
@@ -81,7 +109,6 @@ app.get("/hierarchy/:emp", async (req, res) => {
     const root = {};
     const salesByEmp = {};
 
-    // ---------- Group sales per employee ----------
     rows.forEach(r => {
       if (!salesByEmp[r.Emp_Code]) salesByEmp[r.Emp_Code] = [];
       if (r.ProductName) {
@@ -92,7 +119,6 @@ app.get("/hierarchy/:emp", async (req, res) => {
       }
     });
 
-    // ---------- Build employee map ----------
     rows.forEach(r => {
       const amount = r.Role === "BE" ? r.amount : 0;
       if (!map[r.Emp_Name]) {
@@ -101,12 +127,11 @@ app.get("/hierarchy/:emp", async (req, res) => {
           territory: r.Territory || null,
           role: r.Role || null,
           children: {},
-          sales: r.Role === "BE" ? (salesByEmp[r.Emp_Code] || []) : [] // BEs: array, Managers: will be total later
+          sales: r.Role === "BE" ? (salesByEmp[r.Emp_Code] || []) : []
         };
       }
     });
 
-    // ---------- Connect hierarchy ----------
     rows.forEach(r => {
       if (r.Emp_Name === emp) {
         root[r.Emp_Name] = map[r.Emp_Name];
@@ -115,35 +140,33 @@ app.get("/hierarchy/:emp", async (req, res) => {
       }
     });
 
-    // ---------- Compute averages + sales aggregation ----------
     for (const top in root) {
       computeAggregates(root[top]);
     }
 
     res.json(root);
   } catch (err) {
-    console.error("❌ Error:", err);
+    console.error("❌ Error in /hierarchy:", err);
     res.status(500).send("Error fetching hierarchy");
   }
 });
 
-
+// ---------- Employees ----------
 app.get('/employees', async (req, res) => {
   try {
     const [rows] = await pool.query(`
       SELECT Emp_Name AS name, Role, Emp_Code, Territory 
       FROM Employee_Details 
-     
       ORDER BY Emp_Name
     `);
     res.json(rows);
-    
   } catch (err) {
-    console.error(err);
+    console.error('Error /employees:', err);
     res.status(500).send("Error");
   }
 });
-/*adding commitments*/
+
+// ---------- Commitments insert ----------
 app.post('/putData', async (req, res) => {
   try {
     const dataToInsert = req.body;
@@ -182,19 +205,18 @@ app.post('/putData', async (req, res) => {
         goal_date,
         receiver_commit_date,
         commitment
-      ) VALUES ?`;
+      ) VALUES ?
+    `;
 
-    // ✅ Use await instead of callback
     const [result] = await pool.query(query, [values]);
-
-    console.log('hello'); // ✅ Now this will print
     return res.status(201).send('success');
-    
   } catch (err) {
-    console.log('hello1'); // ✅ Now this will print if error
+    console.error('Error /putData:', err);
     return res.status(500).send('Internal Server Error');
   }
 });
+
+// ---------- Escalations insert ----------
 app.post('/putEscalations', async (req, res) => {
   try {
     const dataToInsert = req.body;
@@ -204,7 +226,6 @@ app.post('/putEscalations', async (req, res) => {
       return res.status(400).send('No data received');
     }
 
-    // Map incoming JSON to match table columns
     const values = dataArray.map(row => [
       row.metric,
       row.message,
@@ -224,23 +245,21 @@ app.post('/putEscalations', async (req, res) => {
         territory_code,
         employee_code,
         entry_date
-      ) VALUES ?`;
+      ) VALUES ?
+    `;
 
     const [result] = await pool.query(query, [values]);
-
-    console.log('✅ Escalations inserted successfully');
     return res.status(201).send('success');
-
   } catch (err) {
-    console.error('❌ Error inserting escalations:', err);
+    console.error('Error /putEscalations:', err);
     return res.status(500).send('Internal Server Error');
   }
 });
 
+// ---------- Get commitments by territory ----------
 app.get('/getData/:receiver_territory', async (req, res) => {
   try {
     const { receiver_territory } = req.params;
-
     if (!receiver_territory) {
       return res.status(400).send('receiver_territory is required');
     }
@@ -262,33 +281,22 @@ app.get('/getData/:receiver_territory', async (req, res) => {
       FROM commitments
       WHERE receiver_territory = ?
     `;
-
     const [rows] = await pool.query(query, [receiver_territory]);
 
     if (rows.length === 0) {
       return res.status(404).send('No data found for this territory');
     }
-
     return res.status(200).json(rows);
-
   } catch (err) {
-    console.error('Error fetching data:', err);
+    console.error('Error /getData:', err);
     return res.status(500).send('Internal Server Error');
   }
 });
 
-
-
-// Update receiver_commit_date
+// ---------- Update receiver commit date ----------
 app.put('/updateReceiverCommitDate', async (req, res) => {
   try {
-    const {
-      metric,
-      sender_code,
-      receiver_code,
-      receiver_commit_date
-    } = req.body;
-
+    const { metric, sender_code, receiver_code, receiver_commit_date } = req.body;
     if (!metric || !sender_code || !receiver_code || !receiver_commit_date) {
       return res.status(400).send('metric, sender_code, receiver_code, and receiver_commit_date are required');
     }
@@ -312,11 +320,12 @@ app.put('/updateReceiverCommitDate', async (req, res) => {
 
     res.status(200).send('Date updated successfully');
   } catch (err) {
-    console.error('Error updating date:', err);
+    console.error('Error /updateReceiverCommitDate:', err);
     res.status(500).send('Internal Server Error');
   }
 });
 
+// ---------- Add disclosure (your addEscalation kept) ----------
 app.post("/addEscalation", async (req, res) => {
   try {
     const {
@@ -331,7 +340,6 @@ app.post("/addEscalation", async (req, res) => {
       message
     } = req.body;
 
-    // Validate required fields
     if (
       !metric ||
       !sender ||
@@ -345,47 +353,30 @@ app.post("/addEscalation", async (req, res) => {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // Insert into DB
     const query = `
       INSERT INTO disclosures
       (metric, sender, sender_code, sender_territory, \`from\`, \`to\`, received_date, goal_date, message) 
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
-
-    const values = [
-      metric,
-      sender,
-      sender_code,
-      sender_territory,
-      from,
-      to,
-      received_date,
-      goal_date,
-      message || null
-    ];
-
+    const values = [metric, sender, sender_code, sender_territory, from, to, received_date, goal_date, message || null];
     await pool.query(query, values);
-
     res.status(201).json({ message: "Commitment added successfully" });
   } catch (error) {
-    console.error("Error inserting data:", error);
+    console.error("Error /addEscalation:", error);
     res.status(500).json({ error: "Database error" });
   }
 });
 
+// ---------- Insert info ----------
 app.post('/putInfo', async (req, res) => {
   try {
     const dataToInsert = req.body;
-
-    // Ensure data is always an array
     const dataArray = Array.isArray(dataToInsert) ? dataToInsert : [dataToInsert];
 
-    // Validate empty input
     if (dataArray.length === 0) {
       return res.status(400).send('No data received');
     }
 
-    // Map request data to match table columns
     const values = dataArray.map(row => [
       row.sender,
       row.sender_code,
@@ -407,67 +398,73 @@ app.post('/putInfo', async (req, res) => {
         receiver_territory,
         received_date,
         message
-      ) VALUES ?`;
+      ) VALUES ?
+    `;
 
-    // Execute query
     const [result] = await pool.query(query, [values]);
-
-    console.log('✅ Data inserted into information table');
     return res.status(201).send('success');
-    
   } catch (err) {
-    console.error('❌ Error inserting into information table:', err);
+    console.error('Error /putInfo:', err);
     return res.status(500).send('Internal Server Error');
   }
 });
 
-// Fetch data based on metric + range
+// ---------- Filter data (VALIDATE metric to prevent injection) ----------
+const ALLOWED_METRICS = ['Coverage', 'coverage', 'some_numeric_column']; // <- Replace with your actual numeric columns
 app.post("/filterData", async (req, res) => {
   try {
     const { metric, from, to } = req.body;
-
     if (!metric || from === undefined || to === undefined) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // For your case, only metric = Coverage matters
+    if (!ALLOWED_METRICS.includes(metric)) {
+      return res.status(400).json({ error: "Invalid metric" });
+    }
+
     const query = `
-      SELECT Territory_Name, Emp_Code, Employee_Name, ${metric}
+      SELECT Territory_Name, Emp_Code, Employee_Name, \`${metric}\`
       FROM coverage_details
-      WHERE ${metric} BETWEEN ? AND ?
+      WHERE \`${metric}\` BETWEEN ? AND ?
     `;
-
     const [rows] = await pool.query(query, [from, to]);
-
     res.json(rows);
   } catch (error) {
-    console.error("Error filtering data:", error);
+    console.error("Error /filterData:", error);
     res.status(500).json({ error: "Database error" });
   }
 });
 
+// ---------- Messages by territory ----------
 app.post("/getMessagesByTerritory", async (req, res) => {
   try {
     const { receiver_territory } = req.body;
-
     if (!receiver_territory) {
       return res.status(400).json({ error: "receiver_territory is required" });
     }
 
-    // Query DB
     const query = `
       SELECT * 
       FROM information
       WHERE receiver_territory = ?
     `;
-
     const [rows] = await pool.query(query, [receiver_territory]);
-
     res.json({ results: rows });
   } catch (error) {
-    console.error("Error fetching messages:", error);
+    console.error("Error /getMessagesByTerritory:", error);
     res.status(500).json({ error: "Database error" });
   }
 });
 
-app.listen(8000, () => console.log("Server running on port 8000"));
+// ---------- Graceful shutdown handlers ----------
+process.on('unhandledRejection', (reason, p) => {
+  console.error('Unhandled Rejection at:', p, 'reason:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception thrown:', err);
+});
+
+// ---------- Start server ----------
+const PORT = process.env.PORT || 8000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
