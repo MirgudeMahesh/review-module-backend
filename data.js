@@ -1,36 +1,40 @@
 // server.js
-require('dotenv').config(); // only for local dev; Render/Vercel use env vars
+require('dotenv').config(); // only for local dev; Render/Railway/Vercel use env vars
 const express = require('express');
 const mysql = require('mysql2/promise');
 const cors = require('cors');
-
-const app = express();
 const fs = require('fs');
 const path = require('path');
+
+const app = express();
+
 // ---------- CORS ----------
 // Use FRONTEND_ORIGIN in production; fallback to localhost for local dev
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:3000';
 app.use(cors({ origin: FRONTEND_ORIGIN, credentials: true }));
-
 app.use(express.json());
 
 // ---------- DB pool (supports DATABASE_URL or individual env vars) ----------
-
-
-
 let pool;
 
 try {
-  const sslOptions = process.env.DB_SSL === 'true'
-    ? {
-        ca: fs.readFileSync(path.resolve(__dirname, 'certs', 'aiven-ca.pem')),
-        rejectUnauthorized: true
-      }
-    : undefined;
+  let sslOptions;
+  if (process.env.DB_SSL === 'true') {
+    const certPath = path.resolve(__dirname, 'certs', 'aiven-ca.pem');
+    if (fs.existsSync(certPath)) {
+      sslOptions = {
+        ca: fs.readFileSync(certPath),
+        rejectUnauthorized: true,
+      };
+      console.log('🔐 Using Aiven CA certificate for SSL');
+    } else {
+      sslOptions = { rejectUnauthorized: true };
+      console.log('🔐 Using default SSL (no CA file found)');
+    }
+  }
 
   if (process.env.DATABASE_URL) {
     const dbUrl = new URL(process.env.DATABASE_URL);
-
     pool = mysql.createPool({
       host: dbUrl.hostname,
       port: dbUrl.port ? Number(dbUrl.port) : 3306,
@@ -41,7 +45,6 @@ try {
       connectionLimit: Number(process.env.DB_CONNECTION_LIMIT || 10),
       ssl: sslOptions,
     });
-
   } else {
     pool = mysql.createPool({
       host: process.env.DB_HOST || 'localhost',
@@ -66,18 +69,16 @@ pool.getConnection()
     conn.release();
   })
   .catch(err => {
-    console.error('❌ Failed to connect to Aiven MySQL:', err);
+    console.error('❌ Failed to connect to Aiven MySQL:', err.message);
     process.exit(1);
   });
-
 
 // ---------- Health check ----------
 app.get('/healthz', (_, res) => res.send('ok'));
 
-// ---------- Helper: computeAggregates (unchanged, kept for your logic) ----------
+// ---------- Helper: computeAggregates ----------
 function computeAggregates(node) {
   const childrenKeys = Object.keys(node.children);
-
   if (childrenKeys.length === 0) {
     const totalSales = node.sales.reduce((sum, s) => sum + (s.sales || 0), 0);
     node.totalSales = totalSales;
@@ -104,7 +105,7 @@ function computeAggregates(node) {
   return { amount: node.amount, sales: node.sales };
 }
 
-// ---------- Hierarchy API (kept your logic; parameterized query used) ----------
+// ---------- Hierarchy API ----------
 app.get("/hierarchy/:emp", async (req, res) => {
   const emp = req.params.emp;
   const query = `
@@ -232,7 +233,7 @@ app.post('/putData', async (req, res) => {
       ) VALUES ?
     `;
 
-    const [result] = await pool.query(query, [values]);
+    await pool.query(query, [values]);
     return res.status(201).send('success');
   } catch (err) {
     console.error('Error /putData:', err);
@@ -272,7 +273,7 @@ app.post('/putEscalations', async (req, res) => {
       ) VALUES ?
     `;
 
-    const [result] = await pool.query(query, [values]);
+    await pool.query(query, [values]);
     return res.status(201).send('success');
   } catch (err) {
     console.error('Error /putEscalations:', err);
@@ -349,7 +350,7 @@ app.put('/updateReceiverCommitDate', async (req, res) => {
   }
 });
 
-// ---------- Add disclosure (your addEscalation kept) ----------
+// ---------- Add disclosure ----------
 app.post("/addEscalation", async (req, res) => {
   try {
     const {
@@ -425,7 +426,7 @@ app.post('/putInfo', async (req, res) => {
       ) VALUES ?
     `;
 
-    const [result] = await pool.query(query, [values]);
+    await pool.query(query, [values]);
     return res.status(201).send('success');
   } catch (err) {
     console.error('Error /putInfo:', err);
@@ -491,4 +492,4 @@ process.on('uncaughtException', (err) => {
 
 // ---------- Start server ----------
 const PORT = process.env.PORT || 8000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
